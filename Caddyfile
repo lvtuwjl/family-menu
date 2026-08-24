@@ -1,0 +1,9 @@
+{$DOMAIN} {
+  encode zstd gzip
+
+  basic_auth {
+    family {$BASIC_AUTH_HASH}
+  }
+
+  reverse_proxy app:3000
+}

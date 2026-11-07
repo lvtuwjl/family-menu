@@ -23,7 +23,7 @@ const statusMeta: Record<OrderStatus, { label: string; icon: string; next?: Orde
   pending: { label: "等你接单", icon: "🔔", next: "accepted", action: "接单" },
   accepted: { label: "已经接单", icon: "👌", next: "shopping", action: "去买菜" },
   shopping: { label: "买菜中", icon: "🛒", next: "cooking", action: "开始做饭" },
-  cooking: { label: "烹饪中", icon: "🍳", next: "ready", action: "通知开饭" },
+  cooking: { label: "烹饪中", icon: "🍳", next: "ready", action: "标记开饭" },
   ready: { label: "开饭啦", icon: "🥢", next: "done", action: "吃完啦" },
   done: { label: "已完成", icon: "✅" },
 };
@@ -102,14 +102,44 @@ export function MenuApp({ initialRecipes, initialOrders }: { initialRecipes: Rec
     return () => window.clearTimeout(timer);
   }, [toast]);
 
+  useEffect(() => {
+    if (section !== "orders") return;
+    let active = true;
+    const controller = new AbortController();
+    async function refreshOrders() {
+      if (document.visibilityState !== "visible") return;
+      try {
+        const response = await fetch("/api/orders", { cache: "no-store", signal: controller.signal });
+        if (!response.ok) return;
+        const payload = await response.json();
+        if (active && Array.isArray(payload.orders)) setOrders(payload.orders);
+      } catch {
+        // Keep the last displayed orders when the connection is unavailable.
+      }
+    }
+    void refreshOrders();
+    const timer = window.setInterval(refreshOrders, 10000);
+    document.addEventListener("visibilitychange", refreshOrders);
+    return () => {
+      active = false;
+      controller.abort();
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refreshOrders);
+    };
+  }, [section]);
+
   function addToCart(recipeId: string) {
-    setCart((current) => ({ ...current, [recipeId]: (current[recipeId] ?? 0) + 1 }));
+    if ((cart[recipeId] ?? 0) >= 9) {
+      setToast("每道菜最多选择 9 份");
+      return;
+    }
+    setCart((current) => ({ ...current, [recipeId]: Math.min(9, (current[recipeId] ?? 0) + 1) }));
     setToast("已放进今晚的菜单");
   }
 
   function changeQuantity(recipeId: string, delta: number) {
     setCart((current) => {
-      const next = Math.max(0, (current[recipeId] ?? 0) + delta);
+      const next = Math.min(9, Math.max(0, (current[recipeId] ?? 0) + delta));
       const copy = { ...current };
       if (next === 0) delete copy[recipeId]; else copy[recipeId] = next;
       return copy;
@@ -148,17 +178,21 @@ export function MenuApp({ initialRecipes, initialOrders }: { initialRecipes: Rec
   async function advanceOrder(order: FamilyOrder) {
     const next = statusMeta[order.status].next;
     if (!next) return;
-    const response = await fetch(`/api/orders/${order.id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ status: next }),
-    });
-    const payload = await response.json();
-    if (response.ok) {
-      setOrders((current) => current.map((item) => item.id === order.id ? payload.order : item));
-      setToast(next === "ready" ? "已经通知：开饭啦！" : `订单已更新为“${statusMeta[next].label}”`);
-    } else {
-      setToast(payload.error || "更新失败");
+    try {
+      const response = await fetch(`/api/orders/${order.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: next }),
+      });
+      const payload = await response.json();
+      if (response.ok) {
+        setOrders((current) => current.map((item) => item.id === order.id ? payload.order : item));
+        setToast(`订单已更新为“${statusMeta[next].label}”`);
+      } else {
+        setToast(payload.error || "更新失败");
+      }
+    } catch {
+      setToast("网络连接失败，请重试");
     }
   }
 
@@ -219,7 +253,7 @@ export function MenuApp({ initialRecipes, initialOrders }: { initialRecipes: Rec
               <span className="dish-count">{visibleRecipes.length} 道可选</span>
             </div>
             <div className="preference-row">
-              <div><span>💛</span><p><b>老婆口味：不吃辣</b><small>默认隐藏含辣菜谱，下单时自动提醒大厨</small></p></div>
+              <div><span>💛</span><p><b>口味筛选</b><small>开启后只显示不辣菜谱，下单时附上不辣备注</small></p></div>
               <button className={nonSpicyOnly ? "active" : ""} aria-pressed={nonSpicyOnly} onClick={() => setNonSpicyOnly((current) => !current)}>
                 {nonSpicyOnly ? "✓ 只看不辣" : "查看全部辣度"}
               </button>
@@ -248,7 +282,7 @@ export function MenuApp({ initialRecipes, initialOrders }: { initialRecipes: Rec
       ) : (
         <section className="orders-page">
           <div className="orders-hero">
-            <div><span className="eyebrow">{role === "chef" ? "大厨工作台" : "我的点单"}</span><h1>{role === "chef" ? "今晚的任务清单" : "好饭正在路上"}</h1><p>{role === "chef" ? "接单、买菜、开火，每一步都让她看得见。" : "看看大厨做到哪一步了。"}</p></div>
+            <div><span className="eyebrow">{role === "chef" ? "大厨工作台" : "我的点单"}</span><h1>{role === "chef" ? "今晚的任务清单" : "好饭正在路上"}</h1><p>{role === "chef" ? "接单、买菜、开火，随时更新订单进度。" : "查看大厨做到哪一步了，页面会自动更新。"}</p></div>
             <div className="order-summary"><strong>{activeOrders.length}</strong><span>张进行中的订单</span></div>
           </div>
           <div className="orders-list">
@@ -266,7 +300,7 @@ export function MenuApp({ initialRecipes, initialOrders }: { initialRecipes: Rec
                   {order.note && <span>✎ “{order.note}”</span>}
                 </div>
                 {role === "chef" && statusMeta[order.status].next && <button className="primary-action" onClick={() => advanceOrder(order)}>{statusMeta[order.status].action} <span>→</span></button>}
-                {role === "wife" && order.status === "ready" && <div className="ready-message">大厨喊你吃饭啦，趁热去餐桌吧！</div>}
+                {role === "wife" && order.status === "ready" && <div className="ready-message">大厨已标记开饭，可以准备吃饭啦！</div>}
               </article>
             )) : <div className="empty-state"><span>📜</span><h3>还没有点单</h3><p>去菜单里挑几道喜欢的菜吧。</p></div>}
           </div>
@@ -287,7 +321,7 @@ export function MenuApp({ initialRecipes, initialOrders }: { initialRecipes: Rec
         <section className="cart-sheet" role="dialog" aria-modal="true" aria-label="确认点单">
           <div className="sheet-handle" />
           <div className="sheet-head"><div><span className="eyebrow">今晚的菜单</span><h2>确认点单</h2></div><button className="close-button" onClick={() => setCartOpen(false)} aria-label="关闭">×</button></div>
-          {nonSpicyOnly && <div className="taste-reminder">🌿 已为老婆标记：不要辣</div>}
+          {nonSpicyOnly && <div className="taste-reminder">🌿 已为订单标记：不要辣</div>}
           <div className="cart-list">
             {cartItems.map(({ recipe, quantity }) => <div className="cart-item" key={recipe.id}><span className="mini-dish" style={{ background: `linear-gradient(145deg, ${recipe.colorFrom}, ${recipe.colorTo})` }}>{recipe.emoji}</span><div><b>{recipe.name}</b><small>{recipe.cookTime} 分钟 · {recipe.flavor} · {spiceMeta[recipe.spiceLevel].label}</small></div><div className="stepper"><button onClick={() => changeQuantity(recipe.id, -1)} aria-label={`减少${recipe.name}`}>−</button><span>{quantity}</span><button onClick={() => changeQuantity(recipe.id, 1)} aria-label={`增加${recipe.name}`}>+</button></div></div>)}
           </div>
@@ -296,7 +330,7 @@ export function MenuApp({ initialRecipes, initialOrders }: { initialRecipes: Rec
             <label><span>希望几点开饭</span><input type="time" value={requestedFor} onChange={(event) => setRequestedFor(event.target.value)} /></label>
             <label><span>给大厨留言 <small>选填</small></span><textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="比如：不要香菜、米饭少一点～" maxLength={200} /></label>
           </div>
-          <button className="submit-order" disabled={sending} onClick={submitOrder}>{sending ? "正在把菜单送给大厨…" : `确认点单 · ${cartCount} 份`}<span>♥</span></button>
+          <button className="submit-order" disabled={sending || cartCount === 0} onClick={submitOrder}>{sending ? "正在把菜单送给大厨…" : `确认点单 · ${cartCount} 份`}<span>♥</span></button>
         </section>
       </div>}
 
